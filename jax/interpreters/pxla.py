@@ -270,7 +270,6 @@ ShardingSpec.__repr__ = sharding_spec_repr  # type: ignore
 # Do not pollute the namespace
 del sharding_spec_mesh_shape, sharding_spec_indices, sharding_spec_repr
 
-
 def spec_to_indices(shape: Tuple[int, ...],
                     spec: ShardingSpec) -> Tuple[Index, ...]:
   """Returns numpy-style indices corresponding to a sharding spec.
@@ -1455,10 +1454,13 @@ class Mesh:
 
   @property
   def device_ids(self):
+    assert not self.empty
     return np.vectorize(lambda d: d.id, otypes=[int])(self.devices)
 
   def __repr__(self):
-    return f"Mesh({self.devices!r}, {self.axis_names!r})"
+    if self.empty:
+      return "Mesh([], ())"
+    return f"Mesh({self.device_ids!r}, {self.axis_names!r})"
 
   def local_to_global(self, axes: ArrayMapping, aval):
     return untile_aval_nd(self.shape, axes,
@@ -1638,9 +1640,11 @@ class MeshComputation:
     self.hlo = hlo
     self.compile_args = compile_args
 
-  def compile(self):
+  def compile(self, allow_propagation_to_outputs : bool = False):
     if self._executable is None:
-      self._executable = MeshExecutable(self.hlo, *self.compile_args)
+      self._executable = MeshExecutable(
+          self.hlo, *self.compile_args,
+          allow_propagation_to_outputs=allow_propagation_to_outputs)
     return self._executable
 
 
@@ -1652,7 +1656,8 @@ class MeshExecutable:
                local_out_untiled_avals: Sequence[ShapedArray],
                in_axes: Sequence[ArrayMapping],
                out_axes: Sequence[ArrayMapping],
-               spmd_lowering: bool, tuple_args: bool):
+               spmd_lowering: bool, tuple_args: bool,
+               allow_propagation_to_outputs: bool):
     assert not mesh.empty
     backend = xb.get_device_backend(mesh.devices.flat[0])
 
@@ -1672,6 +1677,7 @@ class MeshExecutable:
         use_spmd_partitioning=spmd_lowering,
     )
     compile_options.parameter_is_tupled_arguments = tuple_args
+    compile_options.executable_build_options.allow_spmd_sharding_propagation_to_output = allow_propagation_to_outputs
 
     local_sharding_spec = mesh_sharding_specs(local_axis_sizes, mesh.axis_names)
     local_input_specs = [local_sharding_spec(aval, aval_in_axes)
@@ -1696,6 +1702,7 @@ class MeshExecutable:
       handle_args = InputsHandler(compiled.local_devices(), local_input_specs,
                                   input_indices)
       self.unsafe_call = partial(execute_replicated, compiled, backend, handle_args, handle_outs)
+      self.compiled = compiled
 
   def __call__(self, *args):
     # TODO(apaszke): Validate arguments

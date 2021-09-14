@@ -47,6 +47,17 @@ def tearDownModule():
   jtu.restore_spmd_lowering_flag()
 
 
+@curry
+def check_1d_2d_mesh(f, set_mesh):
+  return parameterized.named_parameters(
+    {"testcase_name": "_" + name, "mesh": mesh, "resources": resources}
+    for name, mesh, resources in (
+      ("2", (("x", 2),), "x"),
+      ("2x1", (("x", 2), ("y", 1)), ("x", "y")),
+      ("2x2", (("x", 2), ("y", 2)), ("x", "y")),
+    ))(jtu.with_mesh_from_kwargs(f) if set_mesh else f)
+
+
 # TODO(skye): make the buffer donation utils part of JaxTestCase
 class PJitTest(jtu.BufferDonationTestCase):
 
@@ -240,14 +251,18 @@ class PJitTest(jtu.BufferDonationTestCase):
     self.assertAllClose(y, jnp.sin(x).sum() + h.sum())
     self.assertTrue(hasattr(y, "sharding_spec"))
 
-  @jtu.with_mesh([('x', 2), ('y', 1)])
-  def testJVP(self):
+  @check_1d_2d_mesh(set_mesh=True)
+  def testAutodiff(self, mesh, resources):
+    if len(mesh) != 2: return
+    assert resources == ('x', 'y')
     # Add a constant captured by the nested pjit to make things more complicated
     h = jnp.arange(4)
-    f = pjit(lambda x: x.sum() + h.sum(), in_axis_resources=P('x', 'y'), out_axis_resources=None)
-    g = pjit(lambda x: f(x + 2), in_axis_resources=P('x', None), out_axis_resources=None)
-    jtu.check_grads(g, (jnp.arange(16, dtype=jnp.float32).reshape((4, 4)),),
-                    order=2, modes=["fwd"], eps=1)
+    f = pjit(lambda x: x.sum(1) * h.sum(),
+             in_axis_resources=P('x', 'y'), out_axis_resources=P(('x', 'y')))
+    g = pjit(lambda x: f(jnp.sin(x * 4 + 2)),
+             in_axis_resources=P('x', None), out_axis_resources=P(('x', 'y')))
+    jtu.check_grads(g, (jnp.arange(16, dtype=jnp.float32).reshape((4, 4)) / 100,),
+                    order=2)
 
   @jtu.with_mesh([('x', 2), ('y', 1)])
   def testEvalJaxpr(self):
@@ -459,16 +474,6 @@ class PJitTest(jtu.BufferDonationTestCase):
       check_outfeed(d, x[:, 5 * didx:5 * didx + 5])
 
     execution.join()
-
-@curry
-def check_1d_2d_mesh(f, set_mesh):
-  return parameterized.named_parameters(
-    {"testcase_name": "_" + name, "mesh": mesh, "resources": resources}
-    for name, mesh, resources in (
-      ("2", (("x", 2),), "x"),
-      ("2x1", (("x", 2), ("y", 1)), ("x", "y")),
-      ("2x2", (("x", 2), ("y", 2)), ("x", "y")),
-    ))(jtu.with_mesh_from_kwargs(f) if set_mesh else f)
 
 def spec_regex(s):
   return str(s).replace(r"(", r"\(").replace(r")", r"\)")
